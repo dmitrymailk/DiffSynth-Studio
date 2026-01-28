@@ -1,4 +1,5 @@
-accelerate launch examples/qwen_image/model_training/train.py \
+pushd /code/auto_remaster/sandbox/DiffSynth-Studio
+accelerate launch examples/qwen_image/model_training/train_hf.py \
   --dataset_base_path data/example_image_dataset \
   --dataset_metadata_path data/example_image_dataset/metadata_qwen_imgae_edit_multi.json \
   --data_file_keys "image,edit_image" \
@@ -16,4 +17,7 @@ accelerate launch examples/qwen_image/model_training/train.py \
   --use_gradient_checkpointing \
   --dataset_num_workers 8 \
   --find_unused_parameters \
-  --zero_cond_t 
+  --zero_cond_t \
+  --dataset_name dim/nfs_pix2pix_1920_1080_v5 \
+  --cache_dir /code/dataset/nfs_pix2pix_1920_1080_v5 
+

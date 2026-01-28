@@ -164,12 +164,53 @@ def qwen_image_parser():
         action="store_true",
         help="A special parameter introduced by Qwen-Image-Edit-2511. Please enable it for this model.",
     )
+
     return parser
 
 
+from dataclasses import dataclass, field
+
+
+@dataclass
+class DiffusionTrainingArguments:
+    resolution: int = field(default=512)
+    seed: int = field(default=2026)
+    source_image_name: str = field(default="source_image")
+    target_image_name: str = field(default="target_image")
+    caption_column: str = field(default="caption")
+    tracker_project_name: str = field(default="auto_remaster")
+    cache_dir: str = field(default=None)
+    dataset_name: str = field(default="")
+
+
+from trl import TrlParser
+
+# from transformers import HfArgumentParser
+from datasets import load_dataset
+
+
+def make_parser():
+    dataclass_types = DiffusionTrainingArguments
+    # parser = HfArgumentParser(dataclass_types)
+    parser = TrlParser(dataclass_types)
+    return parser
+
+
+from typing import cast, Tuple, Any
+from torchvision import transforms
+
 if __name__ == "__main__":
     parser = qwen_image_parser()
-    args = parser.parse_args()
+    # args = parser.parse_args()
+    args, leftovers = parser.parse_known_args()
+    my_parser = make_parser()
+    diffusion_args = cast(
+        DiffusionTrainingArguments,
+        my_parser.parse_args_and_config(args=leftovers),
+    )
+    diffusion_args: DiffusionTrainingArguments = diffusion_args[0]
+    print(diffusion_args)
+
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         kwargs_handlers=[
@@ -178,48 +219,86 @@ if __name__ == "__main__":
             )
         ],
     )
-    dataset = UnifiedDataset(
-        base_path=args.dataset_base_path,
-        metadata_path=args.dataset_metadata_path,
-        repeat=args.dataset_repeat,
-        data_file_keys=args.data_file_keys.split(","),
-        main_data_operator=UnifiedDataset.default_image_operator(
-            base_path=args.dataset_base_path,
-            max_pixels=args.max_pixels,
-            height=args.height,
-            width=args.width,
-            height_division_factor=16,
-            width_division_factor=16,
-        ),
-        special_operator_map={
-            # Qwen-Image-Layered
-            "layer_input_image": ToAbsolutePath(args.dataset_base_path)
-            >> LoadImage(convert_RGB=False, convert_RGBA=True)
-            >> ImageCropAndResize(args.height, args.width, args.max_pixels, 16, 16),
-            "image": RouteByType(
-                operator_map=[
-                    (
-                        str,
-                        ToAbsolutePath(args.dataset_base_path)
-                        >> LoadImage()
-                        >> ImageCropAndResize(
-                            args.height, args.width, args.max_pixels, 16, 16
-                        ),
-                    ),
-                    (
-                        list,
-                        SequencialProcess(
-                            ToAbsolutePath(args.dataset_base_path)
-                            >> LoadImage(convert_RGB=False, convert_RGBA=True)
-                            >> ImageCropAndResize(
-                                args.height, args.width, args.max_pixels, 16, 16
-                            )
-                        ),
-                    ),
-                ]
-            ),
-        },
+    # dataset = UnifiedDataset(
+    #     base_path=args.dataset_base_path,
+    #     metadata_path=args.dataset_metadata_path,
+    #     repeat=args.dataset_repeat,
+    #     data_file_keys=args.data_file_keys.split(","),
+    #     main_data_operator=UnifiedDataset.default_image_operator(
+    #         base_path=args.dataset_base_path,
+    #         max_pixels=args.max_pixels,
+    #         height=args.height,
+    #         width=args.width,
+    #         height_division_factor=16,
+    #         width_division_factor=16,
+    #     ),
+    #     special_operator_map={
+    #         # Qwen-Image-Layered
+    #         "layer_input_image": ToAbsolutePath(args.dataset_base_path)
+    #         >> LoadImage(convert_RGB=False, convert_RGBA=True)
+    #         >> ImageCropAndResize(args.height, args.width, args.max_pixels, 16, 16),
+    #         "image": RouteByType(
+    #             operator_map=[
+    #                 (
+    #                     str,
+    #                     ToAbsolutePath(args.dataset_base_path)
+    #                     >> LoadImage()
+    #                     >> ImageCropAndResize(
+    #                         args.height, args.width, args.max_pixels, 16, 16
+    #                     ),
+    #                 ),
+    #                 (
+    #                     list,
+    #                     SequencialProcess(
+    #                         ToAbsolutePath(args.dataset_base_path)
+    #                         >> LoadImage(convert_RGB=False, convert_RGBA=True)
+    #                         >> ImageCropAndResize(
+    #                             args.height, args.width, args.max_pixels, 16, 16
+    #                         )
+    #                     ),
+    #                 ),
+    #             ]
+    #         ),
+    #     },
+    # )
+
+    dataset = load_dataset(
+        diffusion_args.dataset_name,
+        cache_dir=diffusion_args.cache_dir,
     )
+
+    source_column = diffusion_args.source_image_name
+    target_column = diffusion_args.target_image_name
+
+    train_transforms = transforms.Compose(
+        [
+            transforms.Resize(
+                diffusion_args.resolution,
+                interpolation=transforms.InterpolationMode.LANCZOS,
+            ),
+            transforms.CenterCrop(diffusion_args.resolution),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                (0.5, 0.5, 0.5),
+                (0.5, 0.5, 0.5),
+            ),
+        ]
+    )
+
+    def preprocess_train(examples):
+        source_images = [image.convert("RGB") for image in examples[source_column]]
+        target_images = [image.convert("RGB") for image in examples[target_column]]
+        # TODO: при более сложных преобразованиях трансформацию необходимо делать в паре
+        # а не независимо
+        examples["source_images"] = [train_transforms(image) for image in source_images]
+        examples["target_images"] = [train_transforms(image) for image in target_images]
+        return examples
+
+    with accelerator.main_process_first():
+        dataset["train"] = dataset["train"].shuffle(seed=diffusion_args.seed)
+        # Set the training transforms
+        dataset = dataset["train"].with_transform(preprocess_train)
+
     model = QwenImageTrainingModule(
         model_paths=args.model_paths,
         model_id_with_origin_paths=args.model_id_with_origin_paths,
