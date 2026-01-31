@@ -49,6 +49,7 @@ def launch_training_task(
         return {
             "image": source_images,
             "edit_image": target_images,
+            "prompt": ["make this image photorealistic"] * source_images.shape[0],
         }
 
     dataloader = torch.utils.data.DataLoader(
@@ -62,19 +63,23 @@ def launch_training_task(
     model, optimizer, dataloader, scheduler = accelerator.prepare(
         model, optimizer, dataloader, scheduler
     )
-
+    global_step = 0
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader):
             with accelerator.accumulate(model):
+                global_step += 1
                 optimizer.zero_grad()
-                if dataset.load_from_cache:
-                    loss = model({}, inputs=data)
-                else:
-                    loss = model(data)
+                # if dataset.load_from_cache:
+                #     loss = model({}, inputs=data)
+                # else:
+                loss = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
                 scheduler.step()
+                if global_step % 100:
+                    # validation
+                    pass
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)

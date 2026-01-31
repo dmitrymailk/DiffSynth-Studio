@@ -22,8 +22,10 @@ class Flux2ImagePipeline(BasePipeline):
 
     def __init__(self, device=get_device_type(), torch_dtype=torch.bfloat16):
         super().__init__(
-            device=device, torch_dtype=torch_dtype,
-            height_division_factor=16, width_division_factor=16,
+            device=device,
+            torch_dtype=torch_dtype,
+            height_division_factor=16,
+            width_division_factor=16,
         )
         self.scheduler = FlowMatchScheduler("FLUX.2")
         self.text_encoder: Flux2TextEncoder = None
@@ -42,20 +44,21 @@ class Flux2ImagePipeline(BasePipeline):
             Flux2Unit_ImageIDs(),
         ]
         self.model_fn = model_fn_flux2
-    
-    
+
     @staticmethod
     def from_pretrained(
         torch_dtype: torch.dtype = torch.bfloat16,
         device: Union[str, torch.device] = get_device_type(),
         model_configs: list[ModelConfig] = [],
-        tokenizer_config: ModelConfig = ModelConfig(model_id="black-forest-labs/FLUX.2-dev", origin_file_pattern="tokenizer/"),
+        tokenizer_config: ModelConfig = ModelConfig(
+            model_id="black-forest-labs/FLUX.2-dev", origin_file_pattern="tokenizer/"
+        ),
         vram_limit: float = None,
     ):
         # Initialize pipeline
         pipe = Flux2ImagePipeline(device=device, torch_dtype=torch_dtype)
         model_pool = pipe.download_and_load_models(model_configs, vram_limit)
-        
+
         # Fetch models
         pipe.text_encoder = model_pool.fetch_model("flux2_text_encoder")
         pipe.text_encoder_qwen3 = model_pool.fetch_model("z_image_text_encoder")
@@ -64,12 +67,11 @@ class Flux2ImagePipeline(BasePipeline):
         if tokenizer_config is not None:
             tokenizer_config.download_if_necessary()
             pipe.tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.path)
-        
+
         # VRAM Management
         pipe.vram_management_enabled = pipe.check_vram_management_state()
         return pipe
-    
-    
+
     @torch.no_grad()
     def __call__(
         self,
@@ -93,9 +95,13 @@ class Flux2ImagePipeline(BasePipeline):
         # Steps
         num_inference_steps: int = 30,
         # Progress bar
-        progress_bar_cmd = tqdm,
+        progress_bar_cmd=tqdm,
     ):
-        self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=height//16*width//16)
+        self.scheduler.set_timesteps(
+            num_inference_steps,
+            denoising_strength=denoising_strength,
+            dynamic_shift_len=height // 16 * width // 16,
+        )
 
         # Parameters
         inputs_posi = {
@@ -104,32 +110,65 @@ class Flux2ImagePipeline(BasePipeline):
         inputs_nega = {
             "negative_prompt": negative_prompt,
         }
+        # print(
+        #     "inputs_shared",
+        #     "input_image=",
+        #     input_image.shape,
+        #     "edit_image=",
+        #     edit_image.shape,
+        # )
         inputs_shared = {
-            "cfg_scale": cfg_scale, "embedded_guidance": embedded_guidance,
-            "input_image": input_image, "denoising_strength": denoising_strength,
-            "edit_image": edit_image, "edit_image_auto_resize": edit_image_auto_resize,
-            "height": height, "width": width,
-            "seed": seed, "rand_device": rand_device,
+            "cfg_scale": cfg_scale,
+            "embedded_guidance": embedded_guidance,
+            "input_image": input_image,
+            "denoising_strength": denoising_strength,
+            "edit_image": edit_image,
+            "edit_image_auto_resize": edit_image_auto_resize,
+            "height": height,
+            "width": width,
+            "seed": seed,
+            "rand_device": rand_device,
             "num_inference_steps": num_inference_steps,
         }
         for unit in self.units:
-            inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
+            inputs_shared, inputs_posi, inputs_nega = self.unit_runner(
+                unit, self, inputs_shared, inputs_posi, inputs_nega
+            )
 
         # Denoise
         self.load_models_to_device(self.in_iteration_models)
         models = {name: getattr(self, name) for name in self.in_iteration_models}
-        for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
-            timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
-            noise_pred = self.cfg_guided_model_fn(
-                self.model_fn, cfg_scale,
-                inputs_shared, inputs_posi, inputs_nega,
-                **models, timestep=timestep, progress_id=progress_id
+        for progress_id, timestep in enumerate(
+            progress_bar_cmd(self.scheduler.timesteps)
+        ):
+            timestep = timestep.unsqueeze(0).to(
+                dtype=self.torch_dtype, device=self.device
             )
-            inputs_shared["latents"] = self.step(self.scheduler, progress_id=progress_id, noise_pred=noise_pred, **inputs_shared)
-        
+            noise_pred = self.cfg_guided_model_fn(
+                self.model_fn,
+                cfg_scale,
+                inputs_shared,
+                inputs_posi,
+                inputs_nega,
+                **models,
+                timestep=timestep,
+                progress_id=progress_id,
+            )
+            inputs_shared["latents"] = self.step(
+                self.scheduler,
+                progress_id=progress_id,
+                noise_pred=noise_pred,
+                **inputs_shared,
+            )
+
         # Decode
-        self.load_models_to_device(['vae'])
-        latents = rearrange(inputs_shared["latents"], "B (H W) C -> B C H W", H=inputs_shared["height"]//16, W=inputs_shared["width"]//16)
+        self.load_models_to_device(["vae"])
+        latents = rearrange(
+            inputs_shared["latents"],
+            "B (H W) C -> B C H W",
+            H=inputs_shared["height"] // 16,
+            W=inputs_shared["width"] // 16,
+        )
         image = self.vae.decode(latents)
         image = self.vae_output_to_image(image)
         self.load_models_to_device([])
@@ -156,7 +195,7 @@ class Flux2Unit_PromptEmbedder(PipelineUnit):
             input_params_posi={"prompt": "prompt"},
             input_params_nega={"prompt": "negative_prompt"},
             output_params=("prompt_emb", "prompt_emb_mask"),
-            onload_model_names=("text_encoder",)
+            onload_model_names=("text_encoder",),
         )
         self.system_message = "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object attribution and actions without speculation."
 
@@ -196,7 +235,9 @@ class Flux2Unit_PromptEmbedder(PipelineUnit):
         prompt = [prompt] if isinstance(prompt, str) else prompt
 
         # Format input messages
-        messages_batch = self.format_text_input(prompts=prompt, system_message=system_message)
+        messages_batch = self.format_text_input(
+            prompts=prompt, system_message=system_message
+        )
 
         # Process all messages at once
         inputs = tokenizer.apply_chat_template(
@@ -223,14 +264,18 @@ class Flux2Unit_PromptEmbedder(PipelineUnit):
         )
 
         # Only use outputs from intermediate layers and stack them
-        out = torch.stack([output.hidden_states[k] for k in hidden_states_layers], dim=1)
+        out = torch.stack(
+            [output.hidden_states[k] for k in hidden_states_layers], dim=1
+        )
         out = out.to(dtype=dtype, device=device)
 
         batch_size, num_channels, seq_len, hidden_dim = out.shape
-        prompt_embeds = out.permute(0, 2, 1, 3).reshape(batch_size, seq_len, num_channels * hidden_dim)
+        prompt_embeds = out.permute(0, 2, 1, 3).reshape(
+            batch_size, seq_len, num_channels * hidden_dim
+        )
 
         return prompt_embeds
-    
+
     def prepare_text_ids(
         self,
         x: torch.Tensor,  # (B, L, D) or (L, D)
@@ -255,7 +300,7 @@ class Flux2Unit_PromptEmbedder(PipelineUnit):
         text_encoder,
         tokenizer,
         prompt: Union[str, List[str]],
-        dtype = None,
+        dtype=None,
         device: Optional[torch.device] = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: Optional[torch.Tensor] = None,
@@ -278,7 +323,9 @@ class Flux2Unit_PromptEmbedder(PipelineUnit):
 
         batch_size, seq_len, _ = prompt_embeds.shape
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+        prompt_embeds = prompt_embeds.view(
+            batch_size * num_images_per_prompt, seq_len, -1
+        )
 
         text_ids = self.prepare_text_ids(prompt_embeds)
         text_ids = text_ids.to(device)
@@ -288,11 +335,14 @@ class Flux2Unit_PromptEmbedder(PipelineUnit):
         # Skip if Qwen3 text encoder is available (handled by Qwen3PromptEmbedder)
         if pipe.text_encoder_qwen3 is not None:
             return {}
-        
+
         pipe.load_models_to_device(self.onload_model_names)
         prompt_embeds, text_ids = self.encode_prompt(
-            pipe.text_encoder, pipe.tokenizer, prompt,
-            dtype=pipe.torch_dtype, device=pipe.device,
+            pipe.text_encoder,
+            pipe.tokenizer,
+            prompt,
+            dtype=pipe.torch_dtype,
+            device=pipe.device,
         )
         return {"prompt_embeds": prompt_embeds, "text_ids": text_ids}
 
@@ -304,7 +354,7 @@ class Flux2Unit_Qwen3PromptEmbedder(PipelineUnit):
             input_params_posi={"prompt": "prompt"},
             input_params_nega={"prompt": "negative_prompt"},
             output_params=("prompt_emb", "prompt_emb_mask"),
-            onload_model_names=("text_encoder_qwen3",)
+            onload_model_names=("text_encoder_qwen3",),
         )
         self.hidden_states_layers = (9, 18, 27)  # Qwen3 layers
 
@@ -357,11 +407,15 @@ class Flux2Unit_Qwen3PromptEmbedder(PipelineUnit):
             )
 
         # Only use outputs from intermediate layers and stack them
-        out = torch.stack([output.hidden_states[k] for k in self.hidden_states_layers], dim=1)
+        out = torch.stack(
+            [output.hidden_states[k] for k in self.hidden_states_layers], dim=1
+        )
         out = out.to(dtype=dtype, device=device)
 
         batch_size, num_channels, seq_len, hidden_dim = out.shape
-        prompt_embeds = out.permute(0, 2, 1, 3).reshape(batch_size, seq_len, num_channels * hidden_dim)
+        prompt_embeds = out.permute(0, 2, 1, 3).reshape(
+            batch_size, seq_len, num_channels * hidden_dim
+        )
         return prompt_embeds
 
     def prepare_text_ids(
@@ -388,7 +442,7 @@ class Flux2Unit_Qwen3PromptEmbedder(PipelineUnit):
         text_encoder: ZImageTextEncoder,
         tokenizer: AutoTokenizer,
         prompt: Union[str, List[str]],
-        dtype = None,
+        dtype=None,
         device: Optional[torch.device] = None,
         num_images_per_prompt: int = 1,
         prompt_embeds: Optional[torch.Tensor] = None,
@@ -408,7 +462,9 @@ class Flux2Unit_Qwen3PromptEmbedder(PipelineUnit):
 
         batch_size, seq_len, _ = prompt_embeds.shape
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+        prompt_embeds = prompt_embeds.view(
+            batch_size * num_images_per_prompt, seq_len, -1
+        )
 
         text_ids = self.prepare_text_ids(prompt_embeds)
         text_ids = text_ids.to(device)
@@ -418,11 +474,14 @@ class Flux2Unit_Qwen3PromptEmbedder(PipelineUnit):
         # Check if Qwen3 text encoder is available
         if pipe.text_encoder_qwen3 is None:
             return {}
-        
+
         pipe.load_models_to_device(self.onload_model_names)
         prompt_embeds, text_ids = self.encode_prompt(
-            pipe.text_encoder_qwen3, pipe.tokenizer, prompt,
-            dtype=pipe.torch_dtype, device=pipe.device,
+            pipe.text_encoder_qwen3,
+            pipe.tokenizer,
+            prompt,
+            dtype=pipe.torch_dtype,
+            device=pipe.device,
         )
         return {"prompt_embeds": prompt_embeds, "text_ids": text_ids}
 
@@ -435,8 +494,13 @@ class Flux2Unit_NoiseInitializer(PipelineUnit):
         )
 
     def process(self, pipe: Flux2ImagePipeline, height, width, seed, rand_device):
-        noise = pipe.generate_noise((1, 128, height//16, width//16), seed=seed, rand_device=rand_device, rand_torch_dtype=pipe.torch_dtype)
-        noise = noise.reshape(1, 128, height//16 * width//16).permute(0, 2, 1)
+        noise = pipe.generate_noise(
+            (1, 128, height // 16, width // 16),
+            seed=seed,
+            rand_device=rand_device,
+            rand_torch_dtype=pipe.torch_dtype,
+        )
+        noise = noise.reshape(1, 128, height // 16 * width // 16).permute(0, 2, 1)
         return {"noise": noise}
 
 
@@ -445,20 +509,23 @@ class Flux2Unit_InputImageEmbedder(PipelineUnit):
         super().__init__(
             input_params=("input_image", "noise"),
             output_params=("latents", "input_latents"),
-            onload_model_names=("vae",)
+            onload_model_names=("vae",),
         )
 
     def process(self, pipe: Flux2ImagePipeline, input_image, noise):
         if input_image is None:
             return {"latents": noise, "input_latents": None}
-        pipe.load_models_to_device(['vae'])
-        image = pipe.preprocess_image(input_image)
+        pipe.load_models_to_device(["vae"])
+        # image = pipe.preprocess_image(input_image)
+        image = input_image
         input_latents = pipe.vae.encode(image)
         input_latents = rearrange(input_latents, "B C H W -> B (H W) C")
         if pipe.scheduler.training:
             return {"latents": noise, "input_latents": input_latents}
         else:
-            latents = pipe.scheduler.add_noise(input_latents, noise, timestep=pipe.scheduler.timesteps[0])
+            latents = pipe.scheduler.add_noise(
+                input_latents, noise, timestep=pipe.scheduler.timesteps[0]
+            )
             return {"latents": latents, "input_latents": input_latents}
 
 
@@ -467,32 +534,36 @@ class Flux2Unit_EditImageEmbedder(PipelineUnit):
         super().__init__(
             input_params=("edit_image", "edit_image_auto_resize"),
             output_params=("edit_latents", "edit_image_ids"),
-            onload_model_names=("vae",)
+            onload_model_names=("vae",),
         )
 
     def calculate_dimensions(self, target_area, ratio):
         import math
+
         width = math.sqrt(target_area * ratio)
         height = width / ratio
         width = round(width / 32) * 32
         height = round(height / 32) * 32
         return width, height
-    
+
     def crop_and_resize(self, image, target_height, target_width):
         width, height = image.size
         scale = max(target_width / width, target_height / height)
         image = torchvision.transforms.functional.resize(
             image,
-            (round(height*scale), round(width*scale)),
-            interpolation=torchvision.transforms.InterpolationMode.BILINEAR
+            (round(height * scale), round(width * scale)),
+            interpolation=torchvision.transforms.InterpolationMode.BILINEAR,
         )
-        image = torchvision.transforms.functional.center_crop(image, (target_height, target_width))
+        image = torchvision.transforms.functional.center_crop(
+            image, (target_height, target_width)
+        )
         return image
 
     def edit_image_auto_resize(self, edit_image):
-        calculated_width, calculated_height = self.calculate_dimensions(1024 * 1024, edit_image.size[0] / edit_image.size[1])
-        return self.crop_and_resize(edit_image, calculated_height, calculated_width)
-    
+        # calculated_width, calculated_height = self.calculate_dimensions(1024 * 1024, edit_image.size[0] / edit_image.size[1])
+        # return self.crop_and_resize(edit_image, calculated_height, calculated_width)
+        return edit_image
+
     def process_image_ids(self, image_latents, scale=10):
         t_coords = [scale + scale * t for t in torch.arange(0, len(image_latents))]
         t_coords = [t.view(-1) for t in t_coords]
@@ -502,7 +573,9 @@ class Flux2Unit_EditImageEmbedder(PipelineUnit):
             x = x.squeeze(0)
             _, height, width = x.shape
 
-            x_ids = torch.cartesian_prod(t, torch.arange(height), torch.arange(width), torch.arange(1))
+            x_ids = torch.cartesian_prod(
+                t, torch.arange(height), torch.arange(width), torch.arange(1)
+            )
             image_latent_ids.append(x_ids)
 
         image_latent_ids = torch.cat(image_latent_ids, dim=0)
@@ -511,23 +584,30 @@ class Flux2Unit_EditImageEmbedder(PipelineUnit):
         return image_latent_ids
 
     def process(self, pipe: Flux2ImagePipeline, edit_image, edit_image_auto_resize):
+        # print("Flux2Unit_EditImageEmbedder", edit_image.shape)
         if edit_image is None:
             return {}
         pipe.load_models_to_device(self.onload_model_names)
         if isinstance(edit_image, Image.Image):
             edit_image = [edit_image]
         resized_edit_image, edit_latents = [], []
-        for image in edit_image:
-            # Preprocess
-            if edit_image_auto_resize is None or edit_image_auto_resize:
-                image = self.edit_image_auto_resize(image)
-            resized_edit_image.append(image)
-            # Encode
-            image = pipe.preprocess_image(image)
-            latents = pipe.vae.encode(image)
-            edit_latents.append(latents)
+        # for image in edit_image:
+        #     # Preprocess
+        #     # if edit_image_auto_resize is None or edit_image_auto_resize:
+        #     #     image = self.edit_image_auto_resize(image)
+        #     resized_edit_image.append(image)
+        #     # Encode
+        #     # image = pipe.preprocess_image(image)
+        #     latents = pipe.vae.encode(image)
+        #     edit_latents.append(latents)
+        edit_latents = pipe.vae.encode(edit_image)
         edit_image_ids = self.process_image_ids(edit_latents).to(pipe.device)
-        edit_latents = torch.concat([rearrange(latents, "B C H W -> B (H W) C") for latents in edit_latents], dim=1)
+        edit_latents = rearrange(edit_latents, "B C H W -> B (H W) C")
+        # edit_latents = torch.concat(
+        #     [rearrange(latents, "B C H W -> B (H W) C") for latents in edit_latents],
+        #     dim=1,
+        # )
+
         return {"edit_latents": edit_latents, "edit_image_ids": edit_image_ids}
 
 
@@ -574,6 +654,8 @@ def model_fn_flux2(
     image_seq_len = latents.shape[1]
     if edit_latents is not None:
         image_seq_len = latents.shape[1]
+        # print("torch.concat([latents, edit_latents], dim=1)")
+        # print(latents.shape, edit_latents.shape)
         latents = torch.concat([latents, edit_latents], dim=1)
         image_ids = torch.concat([image_ids, edit_image_ids], dim=1)
     embedded_guidance = torch.tensor([embedded_guidance], device=latents.device)

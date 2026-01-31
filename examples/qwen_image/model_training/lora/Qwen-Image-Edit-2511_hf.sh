@@ -12,12 +12,13 @@ accelerate launch examples/qwen_image/model_training/train_hf.py \
   --remove_prefix_in_ckpt "pipe.dit." \
   --output_path "./models/train/Qwen-Image-Edit-2511_lora" \
   --lora_base_model "dit" \
-  --lora_target_modules "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1" \
-  --lora_rank 32 \
+  --lora_target_modules "to_q,to_k,to_v" \
+  --lora_rank 1 \
   --use_gradient_checkpointing \
   --dataset_num_workers 8 \
   --find_unused_parameters \
   --zero_cond_t \
   --dataset_name dim/nfs_pix2pix_1920_1080_v5 \
   --cache_dir /code/dataset/nfs_pix2pix_1920_1080_v5 
+  # --lora_target_modules "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1" \
 
